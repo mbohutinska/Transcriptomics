@@ -5,5 +5,10 @@ SampleMetadata.txt
 
 ### Leaves:
 Alignment_96samples_compil_fromGuillaume.xlsx
+
 sample_map...
+
+
+
+### Start by reading the tkpNotes file.
 
