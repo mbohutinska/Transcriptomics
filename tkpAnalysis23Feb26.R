@@ -2,11 +2,11 @@
 ############ RNA SEQ #########
 ##############################
 
-# Install DESeq2 if not already installed
-#if (!requireNamespace("BiocManager", quietly = TRUE))
-#  install.packages("BiocManager")
-#BiocManager::install("DESeq2")
-#install.packages("DBI")
+#Install DESeq2 if not already installed
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("DESeq2")
+install.packages("DBI")
 # Load the necessary libraries
 library(DESeq2)
 library(ggplot2)
@@ -411,7 +411,7 @@ if (any(is.na(metadata$sampleID))) {
 ### Subset only diploids
 metadata <- metadata[metadata$ploidy == "2x", ]
 # Subset the gene expression data to keep only columns corresponding to 2x individuals
-counts_data <- counts_data[, colnames(counts_data) %in% metadata_subs$sampleID]
+counts_data <- counts_data[, colnames(counts_data) %in% metadata$sampleID]
 
 # Prepare for DESeq2 analysis
 dds <- DESeqDataSetFromMatrix(countData = counts_data, colData = metadata, design = ~ color) #  design = ~ ploidy + ecotype + color
@@ -430,7 +430,7 @@ vsd <- vst(dds, blind = FALSE)
 plotPCA(vsd, intgroup = "color")
 # Nicer PCA
 vsd <- vst(dds, blind = FALSE)
-pcaData <- plotPCA(vsd, intgroup = "color", returnData = TRUE)
+pcaData <- plotPCA(vsd, intgroup = "ecotype", returnData = TRUE)
 percentVar <- round(100 * attr(pcaData, "percentVar"))
 # Add sample labels from the metadata
 pcaData$sampleID <- metadata$sampleID  # Assuming metadata has a sampleID column
@@ -469,7 +469,7 @@ adjusted_pvals <- p.adjust(wilcox_test_results, method = "BH")
 # Combine results into a data frame
 wilcox_res <- data.frame(GeneID = substr(rownames(normalized_counts),1,9), pvalue = wilcox_test_results, padj = adjusted_pvals, statW = wilcox_test_stat)
 # Filter for significant genes (adjusted p-value < 0.001)
-sig_genes <- subset(wilcox_res, padj < 0.05)
+sig_genes <- subset(wilcox_res, padj < 0.009)
 sig_genes <- sig_genes[order(sig_genes$padj), ]
 # Write significant genes to a file
 write.csv(sig_genes, file = "results/rankBasedColor_p0.01_2x.csv", row.names = FALSE)
@@ -514,7 +514,7 @@ write.csv(sig_DEGs_df_ann, file = "results/rankBasedColor_p0.05_2x_annotated.csv
 ###### Visualize
 # candidate genes
 sig_DEGs_df_ann<-fread("results/rankBasedColor_p0.01_2x_annotated.csv")
-
+sig_DEGs_df_ann<-sig_DEGs_df_ann[1:100,]
 pdf("results/rankBasedColor_p0.01_2x_annotated.pdf", width = 4, height = 8)
 for (id in sig_DEGs_df_ann$GeneID) {
   # Extract normalized counts for the specific gene
@@ -914,4 +914,340 @@ for (id in sig_DEGs_df_ann$GeneID) {
   }
 }
 dev.off()
+
+
+
+
+
+
+#################################
+############## WCGNA ############
+#################################
+#install.packages("WGCNA")
+setwd("/home/aa/pigmentation/tkpAnalysis/petalRNASeq/WCGNA/")
+library(WGCNA)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(pheatmap)
+
+options(stringsAsFactors = FALSE);
+allowWGCNAThreads() 
+
+metadata<-read.table("../data/SampleMetadata.txt",h=T)
+dataExpr<-read.csv("../data/normalizedCounts_filtered_240RC_15nonzero_7Oct.csv")
+rownames(dataExpr) <- dataExpr$X
+dataExpr <- dataExpr[, -1]
+
+#### Optional, to subsample genes based on DE results
+wilcox<-read.csv("/home/aa/pigmentation/tkpAnalysis/petalRNASeq/results/rankBasedColor_all_20601_4OctFilt.csv",h=T)
+wilcoxSubs<-subset(wilcox,wilcox$padj<0.1)
+dataExpr<-subset(dataExpr, rownames(dataExpr) %in% paste0(wilcoxSubs$GeneID,".v2.1"))
+#### The end of optional
+
+dataExpr <- as.data.frame(t(dataExpr))
+# My are already filtered, so just in case
+# gsg <- goodSamplesGenes(dataExpr, verbose = 3)
+# dataExpr <- dataExpr[gsg$goodSamples, gsg$goodGenes]
+
+# Perform sample clustering to detect outliers and visualize them:
+sampleTree <- hclust(dist(dataExpr), method = "average")
+plot(sampleTree, main = "Sample Clustering", xlab="", sub="")
+
+
+#### Optional
+# Choose a soft-thresholding power (e.g., 6) based on scale-free topology fit. 
+#This runs long and is only needed once. for my full data it's 8.
+powers <- c(1:30)
+# alternative from maize tutorial: powers = c(c(1:20), seq(from = 22, to=30, by=2))
+sft <- pickSoftThreshold(dataExpr, powerVector = powers, verbose = 5)
+power <- sft$powerEstimate
+# Vizualise and pick the threshold
+par(mfrow = c(1,2));
+cex1 = 0.9;
+plot(sft$fitIndices[, 1],
+     -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     xlab = "Soft Threshold (power)",
+     ylab = "Scale Free Topology Model Fit, signed R^2",
+     main = paste("Scale independence"))
+text(sft$fitIndices[, 1],
+     -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     labels = powers, cex = cex1, col = "red")
+abline(h = 0.90, col = "red")
+plot(sft$fitIndices[, 1],
+     sft$fitIndices[, 5],
+     xlab = "Soft Threshold (power)",
+     ylab = "Mean Connectivity",
+     type = "n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[, 1],
+     sft$fitIndices[, 5],
+     labels = powers,
+     cex = cex1, col = "red")
+
+######### The result was 8, no need to repeat ###############
+
+# Construct the network and detect modules:
+cor <- WGCNA::cor
+net <- blockwiseModules(dataExpr, power = 8, TOMType = "unsigned",
+                        minModuleSize = 20, maxBlockSize = 3000,
+                        mergeCutHeight = 0.25, numericLabels = TRUE, 
+                        pamRespectsDendro = FALSE, saveTOMs = TRUE, 
+                        verbose = 3, loadTOM = F) # Or power = power, Try with min modulesize 20, reassign = 0.05, # IF TOMs GENERATED, LOAD TOM = T
+cor<- stats::cor
+sizeGrWindow(12, 9)
+mergedColors = labels2colors(net$colors)
+pdf(file = "module_tree_blockwise.pdf", width = 8, height = 6);
+plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]],
+                    "Module colors",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+dev.off()
+
+# First, ensure sample IDs in metadata are formatted similarly to the row names in dataExpr
+metadata$sampleID <- paste0("X", as.numeric(metadata$sampleID))
+# Reorder metadata based on the row names of dataExpr
+metadata_reordered <- metadata[match(rownames(dataExpr), metadata$sampleID), ]
+# Check if the reordering worked correctly
+all.equal(rownames(dataExpr), metadata_reordered$sampleID)
+# relate to colors
+rownames(dataExpr)
+metadata_reordered$color
+# Ensure the categorical traits are converted to binary (dummy) variables
+metadata_reordered_binary <- model.matrix(~ ploidy + ecotype + color, data = metadata_reordered)[, -1]
+rownames(metadata_reordered_binary)<-metadata_reordered$sampleID
+
+# Calculate correlations and p-values
+MEs <- moduleEigengenes(dataExpr, net$colors)$eigengenes
+correlationMatrix <- cor(MEs, metadata_reordered_binary, use = "pairwise.complete.obs")
+correlationMatrixAbs<-as.data.frame(abs(correlationMatrix))
+pValues <- corPvalueStudent(correlationMatrix, nrow(MEs))
+
+# Using pheatmap to plot the correlation matrix with significance annotations
+pdf("traitModuleCorAbs.pdf",height = 12,width = 6)
+pheatmap(correlationMatrixAbs, cluster_rows = TRUE, cluster_cols = TRUE,display_numbers = signif(pValues, 2), number_format = "%.2f",main = "Module-Trait Relationships")
+dev.off()
+# Explore the results
+net$colors[net$blockGenes[[1]]]
+MEs
+correlationMatrixAbs
+pValues
+colorModuleVector<-substr(rownames(subset(correlationMatrixAbs,correlationMatrixAbs$colorwhite > 0.7)),3,4)
+colorModuleGenes <- net$colors[net$colors == colorModuleVector]
+# Export correlations
+module_df <- data.frame(
+  gene_id = names(net$colors),
+  modules = net$colors,
+  colors = labels2colors(net$colors)
+)
+write.csv(module_df,"geneModules.csv")
+write.csv(MEs,"modulesIndividuals.csv")
+write.csv(cbind(correlationMatrix,pValues),"moduleTraitCorr.csv")
+
+### Identify hub genes and prepare Cytoscape input
+#modules_of_interest=colorModuleVector #OR: c("0","1","2")
+genes_of_interest = module_df %>%
+  subset(modules %in% colorModuleVector)
+expr_of_interest = dataExpr[,genes_of_interest$gene_id]
+expr_of_interest[1:5,1:5]
+TOM = TOMsimilarityFromExpr(expr_of_interest,power = 8)
+row.names(TOM) = colnames(expr_of_interest)
+colnames(TOM) = colnames(expr_of_interest)
+TOM[1:15,1:15]
+
+#zoom into a candidate gene
+geneCand<-TOM["AL2G24170.v2.1",]
+geneCand<-geneCand[geneCand<1]
+hist(geneCand,breaks = 100)
+summary(geneCand)
+
+geneCand<-TOM["AL7G25360.v2.1",]
+geneCand<-geneCand[geneCand<1]
+hist(geneCand,breaks = 100)
+summary(geneCand)
+geneCand1<-subset(geneCand,geneCand > 0.2)
+
+
+
+
+### Filter network irrespective of gene of interest and find the most connected hub genes
+# Set the threshold
+threshold <- 0.11
+# Filter the TOM matrix based on the threshold
+filtered_edges <- as.data.frame(which(TOM > threshold, arr.ind = TRUE))
+filtered_edges <- filtered_edges %>%
+  mutate(
+    correlation = TOM[cbind(row, col)],
+    gene1 = row.names(TOM)[row],
+    gene2 = colnames(TOM)[col]
+  ) %>%
+  select(-row, -col) %>%
+  filter(gene1 != gene2) %>%
+  mutate(
+    module1 = module_df[gene1, ]$modules,
+    module2 = module_df[gene2, ]$modules
+  )
+# Remove duplicate edges by ensuring each pair appears only once
+filtered_edges <- filtered_edges %>%
+  unique()
+
+connectedness<-as.data.frame(table(filtered_edges$gene1))
+hist(connectedness$Freq,breaks = 100)
+hist(filtered_edges$correlation,breaks = 100)
+summary(filtered_edges$correlation)
+# Write the filtered edge list to a file
+write_delim(filtered_edges, file = "filtered_edgelist_R2_0.11.tsv", delim = "\t")
+
+
+##############The same but log transformed ######### WORKS BETTER
+#################################
+########## WGCNA ###############
+#################################
+setwd("/home/aa/pigmentation/tkpAnalysis/petalRNASeq/WCGNA/")
+library(WGCNA)
+library(dplyr)
+library(data.table)
+library(pheatmap)
+options(stringsAsFactors = FALSE)
+allowWGCNAThreads()
+
+# Load metadata and expression
+metadata <- read.table("../data/SampleMetadata.txt", h = TRUE)
+dataExpr <- read.csv("../data/normalizedCounts_filtered_240RC_15nonzero_7Oct.csv")
+rownames(dataExpr) <- dataExpr$X
+dataExpr <- dataExpr[, -1]
+
+# Optional: filter to DE genes (padj < 0.1)
+wilcox <- read.csv("/home/aa/pigmentation/tkpAnalysis/petalRNASeq/results/rankBasedColor_all_20601_4OctFilt.csv", h = TRUE)
+wilcoxSubs <- subset(wilcox, wilcox$padj < 0.05)
+dataExpr <- subset(dataExpr, rownames(dataExpr) %in% paste0(c(wilcoxSubs$GeneID,"AL8G18230",'AL6G19370','AL4G25370'), ".v2.1"))
+
+## alternative for candidate gene set:
+# dataExpr <- subset(dataExpr, rownames(dataExpr) %in% paste0(c('AL2G24170','AL1G13000','AL5G19690','AL7G30640','AL1G13540','AL8G29160','AL7G42320','AL7G25360','AL6G43450','AL4G33370','AL6G28270','AL4G33640','AL1G20780','AL6G24580','AL8G29370','AL6G48240','AL7G47960','AL4G27010','AL6G24080','AL6G18330','AL2G19520','AL3G35670','AL6G41210','AL1G37490','AL8G41090','AL4G29100','AL2G19700','AL7G31440','AL6G53230','AL3G23970','AL4G47060','AL5G31640','AL8G18230'), ".v2.1"))
+
+
+# Transpose and log-transform
+dataExpr <- as.data.frame(t(dataExpr))
+dataExpr <- log2(dataExpr + 1)
+
+# Optional: sample clustering
+sampleTree <- hclust(dist(dataExpr), method = "average")
+plot(sampleTree, main = "Sample Clustering", xlab="", sub="")
+
+cor <- WGCNA::cor
+net <- blockwiseModules(dataExpr, power = 8, TOMType = "unsigned",
+                        minModuleSize = 20, maxBlockSize = 3000,
+                        mergeCutHeight = 0.25, numericLabels = TRUE, 
+                        pamRespectsDendro = FALSE, saveTOMs = TRUE, 
+                        verbose = 3, loadTOM = F)
+
+mergedColors <- labels2colors(net$colors)
+pdf("module_tree_blockwise.pdf", width = 8, height = 6)
+plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]],
+                    "Module colors", dendroLabels = FALSE, hang = 0.03)
+dev.off()
+
+# Traits and module correlations
+metadata$sampleID <- paste0("X", as.numeric(metadata$sampleID))
+metadata_reordered <- metadata[match(rownames(dataExpr), metadata$sampleID), ]
+metadata_reordered_binary <- model.matrix(~ ploidy + ecotype + color, data = metadata_reordered)[, -1]
+rownames(metadata_reordered_binary) <- metadata_reordered$sampleID
+
+MEs <- moduleEigengenes(dataExpr, net$colors)$eigengenes
+correlationMatrix <- cor(MEs, metadata_reordered_binary, use = "pairwise.complete.obs")
+correlationMatrixAbs <- abs(correlationMatrix)
+pValues <- corPvalueStudent(correlationMatrix, nrow(MEs))
+
+pdf("traitModuleCorAbs.pdf", height = 12, width = 6)
+pheatmap(correlationMatrixAbs, cluster_rows = TRUE, cluster_cols = TRUE,
+         display_numbers = signif(pValues, 2), number_format = "%.2f",
+         main = "Module-Trait Relationships")
+dev.off()
+
+# Extract module and expression info
+correlationMatrixAbs<-as.data.frame(correlationMatrixAbs)
+colorModuleVector <- substr(rownames(subset(correlationMatrixAbs, correlationMatrixAbs$colorwhite > 0.3)), 3, 4)
+module_df <- data.frame(
+  gene_id = names(net$colors),
+  modules = net$colors,
+  colors = labels2colors(net$colors)
+)
+write.csv(module_df, "geneModules.csv")
+write.csv(MEs, "modulesIndividuals.csv")
+write.csv(cbind(correlationMatrix, pValues), "moduleTraitCorr.csv")
+
+# Subset TOM for genes of interest
+genes_of_interest <- module_df %>% filter(modules %in% colorModuleVector)
+expr_of_interest <- dataExpr[, genes_of_interest$gene_id]
+TOM <- TOMsimilarityFromExpr(expr_of_interest, power = 8)
+rownames(TOM) <- colnames(expr_of_interest)
+colnames(TOM) <- colnames(expr_of_interest)
+
+geneCand <- TOM["AL2G24170.v2.1",]
+TOM["AL2G24170.v2.1","AL4G25370.v2.1"]
+TOM["AL2G24170.v2.1","AL6G19370.v2.1"]
+
+
+geneCand <- geneCand[geneCand < 1]
+hist(geneCand,breaks = 100) # this value is not correlation but rather neighborhood similarity. It can be much lower..
+quantile(geneCand,0.9) # a lot of random posibilities for filtration criteria
+threshold <- 0.075 # same here..
+coexpressed_genes <- names(geneCand[geneCand > threshold])
+selected_genes <- c("AL2G24170.v2.1", coexpressed_genes)
+TOM_sub <- TOM[selected_genes, selected_genes]
+
+# Network visualization
+library(igraph)
+TOM_sub[TOM_sub < threshold] <- 0
+graph_obj <- graph_from_adjacency_matrix(TOM_sub, mode = "undirected", weighted = TRUE, diag = FALSE)
+module_colors <- module_df$colors[match(V(graph_obj)$name, module_df$gene_id)]
+V(graph_obj)$color <- module_colors
+
+pdf("coexpressedWithPAP2.pdf", width = 14, height = 14)
+plot(graph_obj, vertex.label = substr(V(graph_obj)$name, 1, 9),
+     vertex.size = 5, edge.width = E(graph_obj)$weight * 10,
+     layout = layout_with_fr)
+dev.off()
+
+# Annotate pre-selected PAP2-co-expressed genes
+# Load ortholog dictionary
+dict <- fread("/home/aa/Desktop/references/lyrataV2/functions/ALATdict.txt")
+dict$AT <- substr(dict$AT, 1, 9)
+# Get unique genes from TOM_sub
+genes_to_annotate <- substr(colnames(TOM_sub), 1, 9)
+genes_to_annotate <- unique(genes_to_annotate)
+
+annotation_list <- list()
+pap2_id <- "AL2G24170.v2.1"
+for (id in genes_to_annotate) {
+  full_id <- colnames(TOM_sub)[substr(colnames(TOM_sub), 1, 9) == id][1]
+  tom_value <- if (!is.na(full_id) && full_id != pap2_id) TOM_sub[pap2_id, full_id] else NA
+  match_row <- dict[AL == id]
+  if (nrow(match_row) > 0) {
+    atcode <- match_row$AT[1]
+    annotation_list[[id]] <- data.table(gene_id = id, TAIR_ID = atcode, TOM_with_PAP2 = tom_value)
+  } else {
+    annotation_list[[id]] <- data.table(gene_id = id, TAIR_ID = NA, TOM_with_PAP2 = tom_value)
+  }
+}
+
+# Combine and save
+TOM_annotation <- rbindlist(annotation_list, use.names = TRUE, fill = TRUE)
+write.csv(TOM_annotation, "annotated_TOM_sub_geneslogtr.csv", row.names = FALSE)
+
+#### Add PAP2-TOM to the table of DEGs
+tab<-fread("/home/aa/pigmentation/tkpAnalysis/petalRNASeq/results/rankBasedColor4OctFilt_0.01_annotated.csv")
+pap2_id <- "AL2G24170.v2.1"
+tab$TOM_with_PAP2 <- NA
+
+for (i in 1:nrow(tab)) { #  i=1
+  gene_id <- paste0(tab$GeneID[i],".v2.1")
+  if (gene_id %in% colnames(TOM) && pap2_id %in% rownames(TOM)) {
+    tab$TOM_with_PAP2[i] <- TOM[pap2_id, gene_id]
+  }
+}
+fwrite(tab, "rankBasedColor4OctFilt_0.01_annotated_PAP2TOM.csv")
+tab1<-subset(tab, tab$TOM_with_PAP2!=1)
+plot(tab1$adjusted_W~tab1$TOM_with_PAP2)
+############### THE END
 
